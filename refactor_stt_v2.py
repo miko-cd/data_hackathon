@@ -19,8 +19,9 @@ import csv
 import re
 import sys
 from pathlib import Path
+from typing import Optional
 
-from pre_clean  import main as pre_clean_main
+from abbr_sym  import main as pre_clean_main
 
 # ── Number → Mongolian words (REPLACED with your function) ──── ──────────────
 
@@ -276,8 +277,7 @@ def _pad(text: str, start: int, end: int, word: str) -> str:
     return word
 
 # ── Fractions & decimals ────────────────────────────────────────────────────
-
-def fraction_to_mn(numer: int, denom: int) -> str | None:
+def fraction_to_mn(numer: int, denom: int) -> Optional[str]:
     if denom == 0:
         return None
     return f"{int_to_mn(denom)}ны {int_to_mn(numer)}"
@@ -296,20 +296,17 @@ def decimal_to_mn(int_part: int, frac_digits: str) -> str:
 
 # ── Date/time/legal/percent normalization ───────────────────────────────────
 
-def _month_day_to_mn(mm: int, dd: int) -> str | None:
+def _month_day_to_mn(mm: int, dd: int) -> Optional[str]:
     if not (1 <= mm <= 12 and 1 <= dd <= 31):
         return None
     return f"{int_to_mn(mm)} сарын {int_to_mn(dd)}"
 
-def _year_month_day_to_mn(yyyy: int, mm: int, dd: int) -> str | None:
+def _year_month_day_to_mn(yyyy: int, mm: int, dd: int) -> Optional[str]:
     if not (1 <= mm <= 12 and 1 <= dd <= 31):
         return None
     return f"{int_to_mn(yyyy)} оны {int_to_mn(mm)} сарын {int_to_mn(dd)}"
 
 def normalize_numbers(text: str) -> str:
-    
-    
-
     
     # Percent first so "25.1%" is not caught by decimals
     def repl_percent_decimal(m):
@@ -397,7 +394,6 @@ def normalize_numbers(text: str) -> str:
     return text
 
 # ── Text cleaning ───────────────────────────────────────────────────────────
-
 def clean_line(line: str) -> str:
     line = line.strip()
     line = line.strip('"')
@@ -414,206 +410,31 @@ def normalize_sentence(sent: str) -> str:
         sent = sent[0].upper() + sent[1:]
     return sent
 
-# ── Sentence reconstruction ─────────────────────────────────────────────────
-
-MN_END = re.compile(r'[.?!]\s*$')
-
-def is_continuation(prev: str, curr: str) -> bool:
-    if not prev or not curr:
-        return False
-    if not MN_END.search(prev):
-        return True
-    if re.match(r'^[а-яөүёa-z]', curr):
-        return True
-    return False
-
-def join_fragments(lines: list) -> list:
-    cleaned = [clean_line(l) for l in lines]
-    cleaned = [l for l in cleaned if l]
-    if not cleaned:
-        return []
-
-    groups = []
-    current = cleaned[0]
-    for line in cleaned[1:]:
-        if is_continuation(current, line):
-            current = current + ' ' + line
-        else:
-            groups.append(current)
-            current = line
-    groups.append(current)
-    return groups
-
-_ENDINGS = [
-    'болжээ', 'байлаа', 'байгаа', 'гэнэ', 'гэв', 'ажээ', 'билээ',
-    'эхэллээ', 'өглөө', 'гарлаа', 'орлоо', 'болоод байна'
-]
-_ENDINGS_RE = re.compile(r'(' + '|'.join(re.escape(e) for e in _ENDINGS) + r')\.?\s+(?=[А-ЯӨҮЁA-Z])')
-
-def split_sentences(text: str) -> list:
-    text = re.sub(r'(?<=[а-яөүёa-z])\.(?=[А-ЯӨҮЁA-Z])', '. ', text)
-    text = _ENDINGS_RE.sub(r'\1. ', text)
-    parts = re.split(r'(?<=[.?!])\s+(?=[А-ЯӨҮЁA-Z])', text)
-    return [p.strip() for p in parts if p.strip()]
-
-# ── Noise detection ─────────────────────────────────────────────────────────
-
-NOISE_PATTERNS = [
-    re.compile(r'^Т\.Америк'),
-    re.compile(r'^\d+$'),
-    re.compile(r'^[^\w]+$'),
-]
-_ENGLISH_RE = re.compile(r'[a-zA-Z]')
-
-def has_english(sent: str) -> bool:
-    return bool(_ENGLISH_RE.search(sent))
-
-def is_noise(sent: str) -> bool:
-    return any(p.match(sent) for p in NOISE_PATTERNS)
-
-MIN_WORDS = 3
-MAX_WORDS = 20
-
-_SPLIT_AT_PUNCT = re.compile(r'[,;]$')
-_SPLIT_BEFORE_CONJ = re.compile(
-    r'^(болон|бөгөөд|харин|тэгвэл|мөн|гэхдээ|учир|хэрэв|гэсэн|гэж|гэнэ|байна|байлаа|ажээ|аж|гэв|юм)$'
-)
-
-def split_long(sent: str) -> list:
-    words = sent.split()
-    if len(words) <= MAX_WORDS:
-        return [sent]
-
-    chunks = []
-    while words:
-        if len(words) <= MAX_WORDS:
-            chunks.append(' '.join(words))
-            break
-
-        best = None
-        for i in range(MAX_WORDS, 11, -1):
-            if _SPLIT_AT_PUNCT.search(words[i - 1]):
-                best = i
-                break
-
-        if best is None:
-            for i in range(MAX_WORDS, 11, -1):
-                if _SPLIT_BEFORE_CONJ.match(words[i - 1].strip(',.;')):
-                    best = i - 1
-                    break
-
-        if best is None:
-            best = MAX_WORDS
-
-        chunks.append(' '.join(words[:best]))
-        words = words[best:]
-
-    _LONE_INITIAL = re.compile(r'(?iu)\b[а-яёөүa-z]\.$')
-
-    merged = []
-    for chunk in chunks:
-        if merged and _LONE_INITIAL.search(merged[-1]):
-            merged[-1] = merged[-1] + ' ' + chunk
-        else:
-            merged.append(chunk)
-
-    result = []
-    for chunk in merged:
-        chunk = chunk.lstrip(', ').strip()
-        if chunk:
-            chunk = chunk[0].upper() + chunk[1:]
-            result.append(chunk)
-    return result
 
 # ── Main pipeline ───────────────────────────────────────────────────────────
-
-def main(input_path: str, output_path: str):
+def main():
     raw_lines = []
-    if Path(input_path).suffix.lower() == '.txt':
-        with open(input_path, encoding='utf-8') as f:
-            raw_lines = [line.strip() for line in f if line.strip()]
-    else:
-        with open(input_path, newline='', encoding='utf-8') as f:
-            reader = csv.reader(f)
-            next(reader, None)
-            for row in reader:
-                if row:
-                    raw_lines.append(row[0])
-
     print(f"[1] Read         : {len(raw_lines):>6} raw rows")
-
-    joined = join_fragments(raw_lines)
-    print(f"[2] After joining: {len(joined):>6} groups")
-
-    sentences = []
-    for group in joined:
-        sentences.extend(split_sentences(group))
-    print(f"[3] After split  : {len(sentences):>6} sentences")
 
     seen = set()
     clean = []
     stats = {'noise': 0, 'english': 0, 'too_short': 0, 'dup': 0}
 
-    for sent in sentences:
-        if is_noise(sent):
-            stats['noise'] += 1
-            continue
-        if has_english(sent):
-            stats['english'] += 1
+    for line in raw_lines:
+        sent = clean_line(line)
+        if not sent:
             continue
 
         normalized = normalize_sentence(sent)
         if not normalized:
             continue
 
-        for chunk in split_long(normalized):
-            words = chunk.split()
-            if len(words) < MIN_WORDS:
-                stats['too_short'] += 1
-                continue
+        if normalized in seen:
+            stats['dup'] += 1
+            continue
 
-            if chunk in seen:
-                stats['dup'] += 1
-                continue
-
-            seen.add(chunk)
-            clean.append(chunk)
+        seen.add(normalized)
+        clean.append(normalized)
 
     print(f"[4] Filtered out : noise={stats['noise']}  english={stats['english']}  short={stats['too_short']}  dup={stats['dup']}")
     print(f"[5] Final output : {len(clean):>6} clean sentences")
-
-    out_path = Path(output_path)
-    if out_path.suffix.lower() == '.csv':
-        with open(output_path, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.writer(f)
-            writer.writerow(['text'])
-            for sent in clean:
-                writer.writerow([sent])
-    else:
-        with open(output_path, 'w', encoding='utf-8') as f:
-            for sent in clean:
-                f.write(sent + '\n')
-
-    print(f"[6] Saved to     : {output_path}")
-
-"""if __name__ == '__main__':
-    inp = sys.argv[1] if len(sys.argv) > 1 else 'test_input.txt'
-    inp_path = Path(inp)
-
-    if inp_path.is_dir():
-        txt_files = sorted(inp_path.glob('*.txt'))
-        if not txt_files:
-            print(f"No .txt files found in {inp_path}")
-            sys.exit(1)
-        print(f"Found {len(txt_files)} .txt files in '{inp_path}'")
-        for txt_file in txt_files:
-            print(f"\n=== Processing: {txt_file.name} ===")
-            final_out = str(txt_file.with_name(txt_file.stem + '_clean.txt'))
-            pre_out   = str(txt_file.with_name(txt_file.stem + '_preclean.txt'))
-            pre_clean_main(str(txt_file), pre_out)
-            main(pre_out, final_out)
-    else:
-        final_out = sys.argv[2] if len(sys.argv) > 2 else str(inp_path.with_suffix('')) + '_clean.txt'
-        pre_out   = str(Path(final_out).with_suffix('')) + '_preclean.txt'
-        pre_clean_main(inp, pre_out)
-        main(pre_out, final_out)"""
