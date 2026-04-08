@@ -1,36 +1,17 @@
 #!/usr/bin/env python3
-"""
-Mongolian STT text refactoring pipeline.
-
-Steps:
-  0. Run pre-clean (cleaning_shit.py) to remove register/profanity, expand abbrev/currency, etc.
-  1. Join fragmented sentence rows
-  2. Split on intra-line sentence boundaries (e.g. "байна.Тэгвэл")
-  3. Normalize numbers → Mongolian words
-  4. Filter noise lines and invalid lengths
-  5. Deduplicate
-  6. Output clean CSV/TXT
-
-Usage:
-  python refactor_stt.py [input.csv|input.txt] [output.csv|output.txt]
-"""
-
 import csv
 import re
 import sys
 from pathlib import Path
 from typing import Optional
 
-from abbr_sym  import main as pre_clean_main
-
-# ── Number → Mongolian words (REPLACED with your function) ──── ──────────────
 
 DIGIT_WORDS = {
     '0': 'тэг', '1': 'нэг', '2': 'хоёр', '3': 'гурав', '4': 'дөрөв',
     '5': 'тав', '6': 'зургаа', '7': 'долоо', '8': 'найм', '9': 'ес'
 }
 
-def number_to_mongolian(n):
+def number_to_mongolian(n, combined_last: bool = False):
     """
     Тоог монгол үг рүү хөрвүүлнэ.
     """
@@ -133,8 +114,7 @@ def number_to_mongolian(n):
     
     # Үлдсэн хэсэг
     if n > 0:
-        result.append(convert_below_thousand(n, is_combined=False))
-    
+        result.append(convert_below_thousand(n, is_combined=combined_last))
     return " ".join(result)
  
  
@@ -189,7 +169,7 @@ def convert_numbers_in_text(text):
     
     Жишээ:
     - "Миний утас 9993-8453 юм" → "Миний утас ерэн ес, ерэн гурав, наян дөрөв, тавин гурав юм"
-    - "2024 онд 150 хүн ирсэн" → "хоёр мянга хорин дөрөв онд зуун тавь хүн ирсэн"
+    - "2024 онд 150 хүн ирсэн" → "хоёр мянга хорин дөрвөн онд зуун тавин хүн ирсэн"
     """
     
     # Эхлээд 8 оронтой утасны дугааруудыг (зураас/зайтай) олж хөрвүүлэх
@@ -205,26 +185,34 @@ def convert_numbers_in_text(text):
     
     text = re.sub(phone_pattern, replace_phone_with_separator, text)
     
-    # Дараа нь бүх тоонуудыг олж хөрвүүлэх
-    # 8 оронтой зүгээр тоог утасны дугаар гэж үзэх
-    number_pattern = r'\b(\d+)\b'
+    number_pattern = r'\b(\d+)\b(\s*)([А-ЯӨҮЁа-яөүё]*)'
     
     def replace_number(match):
         num_str = match.group(1)
-        
-        # 8 оронтой тоог утасны дугаар гэж үзэх
+        spacer = match.group(2) or ""
+        next_word = (match.group(3) or "").lower()
+
+        # нөхцөл дагавар/холбогч эхэлж байвал combined хэлбэр хэрэглэнэ
+        combined_triggers = (
+            "он", "онд", "оноос", "оны", "оос", "өөс",
+            "ын", "ийн", "д", "т", "аас", "ээс",
+            "тай", "тэй", "руу", "рүү", "аар", "ээр"
+        )
+        use_combined = any(next_word.startswith(t) for t in combined_triggers)
+
+        # 8 оронтой утас
         if len(num_str) == 8:
-            result = phone_number_to_mongolian(num_str)
-            if result:
-                return result
-        
-        # Бусад тоонуудыг ердийн журмаар хөрвүүлэх
+            ph = phone_number_to_mongolian(num_str)
+            if ph:
+                return ph + spacer + next_word
+
         try:
             num = int(num_str)
             if num > 1_000_000_000:
-                return ''
-            return number_to_mongolian(num)
-        except (ValueError, IndexError):
+                return ""
+            w = number_to_mongolian(num, combined_last=use_combined)
+            return w + spacer + next_word
+        except Exception:
             return match.group(0)
     
     return re.sub(number_pattern, replace_number, text)
@@ -309,15 +297,36 @@ def _year_month_day_to_mn(yyyy: int, mm: int, dd: int) -> Optional[str]:
 def normalize_numbers(text: str) -> str:
     
     # Percent first so "25.1%" is not caught by decimals
+    # % + optional mongolian suffix (ийг, ийн, ын, д, т, аас, ээс, тай, тэй, руу, рүү ...)
+    PCT_SUFFIX = r'(?:\s*[-–—]?\s*((?:ийг|ыг|ийн|ын|д|т|аас|ээс|тай|тэй|руу|рүү|аар|ээр)))?'
+
     def repl_percent_decimal(m):
-        word = f"{decimal_to_mn(int(m.group(1)), m.group(2))} хувь"
-        return _pad(text, m.start(), m.end(), word)
-    text = re.sub(r'(?<!\d)(\d+)\.(\d+)\s*%(?!\d)', repl_percent_decimal, text)
+        int_part = int(m.group(1))
+        frac = m.group(2)
+        suffix = (m.group(3) or "").strip()
+
+        base = f"{decimal_to_mn(int_part, frac)} хувь"
+        return _pad(text, m.start(), m.end(), (base + (" " + suffix if suffix else "")).strip())
+
+    text = re.sub(
+        rf'(?<!\d)(\d+)\.(\d+)\s*%{PCT_SUFFIX}(?!\d)',
+        repl_percent_decimal,
+        text
+    )
 
     def repl_percent_int(m):
-        word = f"{int_to_mn(int(m.group(1)))} хувь"
-        return _pad(text, m.start(), m.end(), word)
-    text = re.sub(r'(?<!\d)(\d+)\s*%(?!\d)', repl_percent_int, text)
+        n = int(m.group(1))
+        suffix = (m.group(2) or "").strip()
+
+        # combined_last=True -> "нэгэн", "таван" гэх мэт
+        base = f"{number_to_mongolian(n, combined_last=True)} хувь"
+        return _pad(text, m.start(), m.end(), (base + (" " + suffix if suffix else "")).strip())
+
+    text = re.sub(
+        rf'(?<!\d)(\d+)\s*%{PCT_SUFFIX}(?!\d)',
+        repl_percent_int,
+        text
+    )
 
     # Time ranges 10:00-16:00
     def repl_time_range(m):
@@ -392,49 +401,65 @@ def normalize_numbers(text: str) -> str:
     text = re.sub(r'(?<!\d)(\d+)\.(\d+)(?!\d)', repl_decimal, text)
     text = convert_numbers_in_text(text)
     return text
+def remove_special_characters(text: str) -> str:
+    text = text.lower()
 
+    # ярианы эхний зураас
+    text = re.sub(r"(^|\s)[\-\u2013\u2014]+\s*", r"\1", text)
+
+    # ишлэлүүдийг авах
+    text = re.sub(r"[\"'“”‘’«»]", "", text)
+
+    # EN + MN хоёуланг үлдээнэ
+    text = re.sub(r"[^0-9a-zа-яёөү\s\-\.,:/%]", " ", text, flags=re.IGNORECASE)
+
+    # кирилл-кирилл хоорондох зураасыг наах: сайн-уу -> сайнуу
+    text = re.sub(r"([а-яёөү])\s*-\s*([а-яёөү])", r"\1\2", text, flags=re.IGNORECASE)
+
+    # нэрний initials: "др.бат", "a.b" гэх мэтийн цэгийг зай болгох
+    text = re.sub(r"(?<=[а-яёөүa-z])\.(?=[а-яёөүa-z])", " ", text, flags=re.IGNORECASE)
+
+    # slash, colon, percent, comma, dot, dash бүгдийг space болгоод бүрэн цэвэрлэх
+    text = re.sub(r"[.,:/%\-]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 # ── Text cleaning ───────────────────────────────────────────────────────────
 def clean_line(line: str) -> str:
-    line = line.strip()
+    line = str(line).strip()
     line = line.strip('"')
     line = line.lstrip(', ').strip()
     return line
 
 def normalize_sentence(sent: str) -> str:
-    sent = sent.strip().strip('"').lstrip(', ').strip()
+    sent = clean_line(sent)
     sent = re.sub(r'\s+', ' ', sent)
+
     sent = normalize_numbers(sent)
-    sent = re.sub(r'\s+', ' ', sent).strip()
-    sent = sent.rstrip(',').strip()
-    if sent:
-        sent = sent[0].upper() + sent[1:]
+    sent = remove_special_characters(sent)
+    # бүгд жижиг
+    sent = sent.lower().strip()
     return sent
 
 
-# ── Main pipeline ───────────────────────────────────────────────────────────
-def main():
-    raw_lines = []
-    print(f"[1] Read         : {len(raw_lines):>6} raw rows")
-
+def build_refactor():
     seen = set()
-    clean = []
-    stats = {'noise': 0, 'english': 0, 'too_short': 0, 'dup': 0}
 
-    for line in raw_lines:
-        sent = clean_line(line)
+    def _refactor_one(text: str) -> str:
+        sent = clean_line(text)
         if not sent:
-            continue
+            return ""
 
         normalized = normalize_sentence(sent)
         if not normalized:
-            continue
+            return ""
 
+        # dedup by sentence
         if normalized in seen:
-            stats['dup'] += 1
-            continue
-
+            return ""
         seen.add(normalized)
-        clean.append(normalized)
 
-    print(f"[4] Filtered out : noise={stats['noise']}  english={stats['english']}  short={stats['too_short']}  dup={stats['dup']}")
-    print(f"[5] Final output : {len(clean):>6} clean sentences")
+        return normalized
+    return _refactor_one
+
+def main():
+    return build_refactor()
